@@ -37,12 +37,6 @@ C:\minidump.exe lsass.dmp
 
 
 
-### Known Bugs
-
-* Not finding all logon sessions
-
-  
-
 ## Acknowledgements
 
 Minidump is based on the following projects and the work by the creators
