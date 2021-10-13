@@ -1,7 +1,0 @@
-C:\git\MiniDump\bin\Release\Minidump.exe.config
-C:\git\MiniDump\bin\Release\Minidump.exe
-C:\git\MiniDump\bin\Release\Minidump.pdb
-C:\git\MiniDump\obj\Release\Minidump.csproj.CoreCompileInputs.cache
-C:\git\MiniDump\obj\Release\Minidump.exe
-C:\git\MiniDump\obj\Release\Minidump.pdb
-C:\git\MiniDump\obj\Release\Minidump.csproj.AssemblyReference.cache

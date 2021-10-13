@@ -5,10 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
-//tood
-//dpapi
-//cloudap
-
 namespace Minidump
 {
     public class Program
